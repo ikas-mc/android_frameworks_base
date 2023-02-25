@@ -2578,7 +2578,7 @@ public class AppOpsService extends IAppOpsService.Stub {
             setUidModeInner(op, uid, mode, permissionPolicyCallback);
         } else {
             //其他情况不允许
-            Log.w("projectx-appops", String.format("skip setSidMode,uid=%s,op=%s,toSetMode=%s", uid, op, mode));
+            Slog.w("projectx-appops", String.format("skip setSidMode,uid=%s,op=%s,toSetMode=%s", uid, op, mode));
         }
 
     }
