@@ -2526,15 +2526,80 @@ public class AppOpsService extends IAppOpsService.Stub {
         setUidMode(code, uid, mode, null);
     }
 
-    private void setUidMode(int code, int uid, int mode,
-            @Nullable IAppOpsCallback permissionPolicyCallback) {
+
+    private static final int ENHANCED_MODE_OP_START = 100000;
+
+    private static final int[] ALLOW_OP_LIST = new int[]{AppOpsManager.OP_CAMERA, AppOpsManager.OP_RECORD_AUDIO};
+
+    private void setUidMode(int op, int uid, int mode, @Nullable IAppOpsCallback permissionPolicyCallback) {
+
+        boolean enhancedMode = false;
+
+        if (op >= ENHANCED_MODE_OP_START) {
+            enhancedMode = true;
+            op = op - ENHANCED_MODE_OP_START;
+        }
+
         if (DEBUG) {
-            Slog.i(TAG, "uid " + uid + " OP_" + opToName(code) + " := " + modeToName(mode)
+            Slog.i(TAG, "uid " + uid + " OP_" + opToName(op) + " := " + modeToName(mode)
                     + " by uid " + Binder.getCallingUid());
         }
 
         enforceManageAppOpsModes(Binder.getCallingPid(), Binder.getCallingUid(), uid);
-        verifyIncomingOp(code);
+        verifyIncomingOp(op);
+
+
+        //设置为IGNORED,允许调用
+        if (mode == AppOpsManager.MODE_IGNORED) {
+            setUidModeInner(op, uid, mode, permissionPolicyCallback);
+            return;
+        }
+
+        //允许
+        for (int item : ALLOW_OP_LIST) {
+            if (item == op) {
+                setUidModeInner(op, uid, mode, permissionPolicyCallback);
+                return;
+            }
+        }
+
+        //增强模式,允许调用
+        if (enhancedMode) {
+            setUidModeInner(op, uid, mode, permissionPolicyCallback);
+            return;
+        }
+
+        //检查当前uid mode
+        int switchOp = (int) AppOpsManager.opToSwitch(op);
+        int currentMode = getUidModeCustom(uid, switchOp);
+
+        //如果当前不是IGNORED,允许调用
+        if (currentMode != AppOpsManager.MODE_IGNORED) {
+            setUidModeInner(op, uid, mode, permissionPolicyCallback);
+        } else {
+            //其他情况不允许
+            Log.w("projectx-appops", String.format("skip setSidMode,uid=%s,op=%s,toSetMode=%s", uid, op, mode));
+        }
+
+    }
+
+    private int getUidModeCustom(int uid, int code) {
+        synchronized (this) {
+            UidState uidState = getUidStateLocked(uid, false);
+            if (null != uidState) {
+                SparseIntArray opModes = uidState.opModes;
+                if (null != opModes) {
+                    int mode = opModes.get(code, -1220);
+                    return mode;
+                }
+            }
+        }
+        return -1221;
+    }
+
+    private void setUidModeInner(int code, int uid, int mode,
+            @Nullable IAppOpsCallback permissionPolicyCallback) {
+
         code = AppOpsManager.opToSwitch(code);
 
         if (permissionPolicyCallback == null) {

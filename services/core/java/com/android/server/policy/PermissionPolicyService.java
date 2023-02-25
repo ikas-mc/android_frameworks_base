@@ -1087,7 +1087,7 @@ public final class PermissionPolicyService extends SystemService {
                 @NonNull String packageName) {
             final int oldMode = mAppOpsManager.unsafeCheckOpRaw(AppOpsManager.opToPublicName(
                     opCode), uid, packageName);
-            if (oldMode != mode) {
+            if (oldMode != mode && oldMode != MODE_IGNORED) {
                 mAppOpsManagerInternal.setUidModeFromPermissionPolicy(opCode, uid, mode,
                         mAppOpsCallback);
                 final int newMode = mAppOpsManager.unsafeCheckOpRaw(AppOpsManager.opToPublicName(
