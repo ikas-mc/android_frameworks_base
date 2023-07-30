@@ -22,20 +22,20 @@ import android.annotation.Nullable;
 import android.app.ActivityTaskManager;
 import android.app.AlarmManager;
 import android.app.AlarmManager.AlarmClockInfo;
-import android.app.AppGlobals;
-import android.app.IActivityManager;
-import android.app.SynchronousUserSwitchObserver;
 import android.app.admin.DevicePolicyManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Resources;
 import android.media.AudioManager;
+import android.net.ConnectivityManager;
 import android.net.INetworkPolicyListener;
-import android.net.INetworkPolicyManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.NetworkPolicyManager;
 import android.os.Handler;
 import android.os.Looper;
@@ -50,6 +50,7 @@ import android.text.format.DateFormat;
 import android.util.Log;
 import android.view.View;
 
+import androidx.annotation.NonNull;
 import androidx.lifecycle.Observer;
 
 import com.android.systemui.R;
@@ -64,6 +65,7 @@ import com.android.systemui.privacy.logging.PrivacyLogger;
 import com.android.systemui.qs.tiles.DndTile;
 import com.android.systemui.qs.tiles.RotationLockTile;
 import com.android.systemui.screenrecord.RecordingController;
+import com.android.systemui.settings.UserTracker;
 import com.android.systemui.statusbar.CommandQueue;
 import com.android.systemui.statusbar.policy.BluetoothController;
 import com.android.systemui.statusbar.policy.CastController;
@@ -86,8 +88,6 @@ import com.android.systemui.util.time.DateFormatUtil;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executor;
@@ -137,14 +137,15 @@ public class PhoneStatusBarPolicy
     private final DateFormatUtil mDateFormatUtil;
     private final TelecomManager mTelecomManager;
 
+    private final Context mContext;
     private final Handler mHandler;
     private final CastController mCast;
     private final HotspotController mHotspot;
     private final NextAlarmController mNextAlarmController;
     private final AlarmManager mAlarmManager;
     private final UserInfoController mUserInfoController;
-    private final IActivityManager mIActivityManager;
     private final UserManager mUserManager;
+    private final UserTracker mUserTracker;
     private final DevicePolicyManager mDevicePolicyManager;
     private final StatusBarIconController mIconController;
     private final CommandQueue mCommandQueue;
@@ -157,11 +158,14 @@ public class PhoneStatusBarPolicy
     private final KeyguardStateController mKeyguardStateController;
     private final LocationController mLocationController;
     private final PrivacyItemController mPrivacyItemController;
+    private final Executor mMainExecutor;
     private final Executor mUiBgExecutor;
     private final SensorPrivacyController mSensorPrivacyController;
     private final RecordingController mRecordingController;
     private final RingerModeTracker mRingerModeTracker;
     private final PrivacyLogger mPrivacyLogger;
+    private final ConnectivityManager mConnectivityManager;
+    private final NetworkPolicyManager mNetworkPolicyManager;
 
     private boolean mZenVisible;
     private boolean mVibrateVisible;
@@ -171,28 +175,32 @@ public class PhoneStatusBarPolicy
     private boolean mManagedProfileIconVisible = false;
     private boolean mFirewallVisible = false;
 
+    private int mLastResumedActivityUid = -1;
+
     private BluetoothController mBluetooth;
     private AlarmManager.AlarmClockInfo mNextAlarm;
 
     @Inject
-    public PhoneStatusBarPolicy(StatusBarIconController iconController,
+    public PhoneStatusBarPolicy(Context context, StatusBarIconController iconController,
             CommandQueue commandQueue, BroadcastDispatcher broadcastDispatcher,
-            @UiBackground Executor uiBgExecutor, @Main Looper looper, @Main Resources resources,
-            CastController castController, HotspotController hotspotController,
-            BluetoothController bluetoothController, NextAlarmController nextAlarmController,
-            UserInfoController userInfoController, RotationLockController rotationLockController,
-            DataSaverController dataSaverController, ZenModeController zenModeController,
+            @Main Executor mainExecutor, @UiBackground Executor uiBgExecutor, @Main Looper looper,
+            @Main Resources resources, CastController castController,
+            HotspotController hotspotController, BluetoothController bluetoothController,
+            NextAlarmController nextAlarmController, UserInfoController userInfoController,
+            RotationLockController rotationLockController, DataSaverController dataSaverController,
+            ZenModeController zenModeController,
             DeviceProvisionedController deviceProvisionedController,
             KeyguardStateController keyguardStateController,
             LocationController locationController,
-            SensorPrivacyController sensorPrivacyController, IActivityManager iActivityManager,
-            AlarmManager alarmManager, UserManager userManager,
+            SensorPrivacyController sensorPrivacyController, AlarmManager alarmManager,
+            UserManager userManager, UserTracker userTracker,
             DevicePolicyManager devicePolicyManager, RecordingController recordingController,
             @Nullable TelecomManager telecomManager, @DisplayId int displayId,
             @Main SharedPreferences sharedPreferences, DateFormatUtil dateFormatUtil,
             RingerModeTracker ringerModeTracker,
             PrivacyItemController privacyItemController,
             PrivacyLogger privacyLogger) {
+        mContext = context;
         mIconController = iconController;
         mCommandQueue = commandQueue;
         mBroadcastDispatcher = broadcastDispatcher;
@@ -204,8 +212,8 @@ public class PhoneStatusBarPolicy
         mNextAlarmController = nextAlarmController;
         mAlarmManager = alarmManager;
         mUserInfoController = userInfoController;
-        mIActivityManager = iActivityManager;
         mUserManager = userManager;
+        mUserTracker = userTracker;
         mDevicePolicyManager = devicePolicyManager;
         mRotationLockController = rotationLockController;
         mDataSaver = dataSaverController;
@@ -216,10 +224,13 @@ public class PhoneStatusBarPolicy
         mPrivacyItemController = privacyItemController;
         mSensorPrivacyController = sensorPrivacyController;
         mRecordingController = recordingController;
+        mMainExecutor = mainExecutor;
         mUiBgExecutor = uiBgExecutor;
         mTelecomManager = telecomManager;
         mRingerModeTracker = ringerModeTracker;
         mPrivacyLogger = privacyLogger;
+        mConnectivityManager = context.getSystemService(ConnectivityManager.class);
+        mNetworkPolicyManager = context.getSystemService(NetworkPolicyManager.class);
 
         mSlotCast = resources.getString(com.android.internal.R.string.status_bar_cast);
         mSlotHotspot = resources.getString(com.android.internal.R.string.status_bar_hotspot);
@@ -265,11 +276,9 @@ public class PhoneStatusBarPolicy
         mRingerModeTracker.getRingerModeInternal().observeForever(observer);
 
         // listen for user / profile change.
-        try {
-            mIActivityManager.registerUserSwitchObserver(mUserSwitchListener, TAG);
-        } catch (RemoteException e) {
-            // Ignore
-        }
+        mUserTracker.addCallback(mUserSwitchListener, mMainExecutor);
+
+        mNetworkPolicyManager.registerListener(mNetworkPolicyListener);
 
         // TTY status
         updateTTY();
@@ -361,8 +370,6 @@ public class PhoneStatusBarPolicy
         mLocationController.addCallback(this);
         mRecordingController.addCallback(this);
 
-        registerNetworkPolicyListener();
-
         mCommandQueue.addCallback(this);
 
         // Get initial user setup state
@@ -386,7 +393,7 @@ public class PhoneStatusBarPolicy
     }
 
     private void updateAlarm() {
-        final AlarmClockInfo alarm = mAlarmManager.getNextAlarmClock(UserHandle.USER_CURRENT);
+        final AlarmClockInfo alarm = mAlarmManager.getNextAlarmClock(mUserTracker.getUserId());
         final boolean hasAlarm = alarm != null && alarm.getTriggerTime() > 0;
         int zen = mZenController.getZen();
         final boolean zenNone = zen == Global.ZEN_MODE_NO_INTERRUPTIONS;
@@ -599,12 +606,24 @@ public class PhoneStatusBarPolicy
         mUiBgExecutor.execute(() -> {
             try {
                 final int uid = ActivityTaskManager.getService().getLastResumedActivityUid();
-                final boolean isRestricted = INetworkPolicyManager.Stub.asInterface(
-                        ServiceManager.getService(Context.NETWORK_POLICY_SERVICE))
-                        .isUidNetworkingBlocked(uid, false);
+                if (mLastResumedActivityUid != uid) {
+                    mLastResumedActivityUid = uid;
+                    try {
+                        mConnectivityManager.unregisterNetworkCallback(mNetworkCallback);
+                    } catch (IllegalArgumentException e) {
+                        // Ignore
+                    }
+                    mConnectivityManager.registerDefaultNetworkCallbackForUid(uid, mNetworkCallback,
+                            mHandler);
+                }
+                final boolean isRestricted =
+                        mNetworkPolicyManager.isUidNetworkingBlocked(uid, false /*meteredNetwork*/);
                 boolean isLauncher = false;
-                List<ResolveInfo> homeActivities = new ArrayList<>();
-                AppGlobals.getPackageManager().getHomeActivities(homeActivities);
+                List<ResolveInfo> homeActivities =
+                        mContext.getPackageManager().queryIntentActivitiesAsUser(
+                                new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+                                        .addCategory(Intent.CATEGORY_DEFAULT),
+                                PackageManager.ResolveInfoFlags.of(0), UserHandle.getUserId(uid));
                 for (ResolveInfo homeActivity : homeActivities) {
                     if (uid == homeActivity.activityInfo.applicationInfo.uid) {
                         isLauncher = true;
@@ -632,45 +651,32 @@ public class PhoneStatusBarPolicy
         });
     }
 
-    private void registerNetworkPolicyListener() {
-        try {
-            INetworkPolicyManager policyManager = INetworkPolicyManager.Stub.asInterface(
-                    ServiceManager.getService(Context.NETWORK_POLICY_SERVICE));
-            policyManager.registerListener(mNetworkPolicyListener);
-        } catch (RemoteException e) {
-            Log.e(TAG, "registerNetworkPolicyListener: ", e);
-            return;
-        }
-    }
+    private final ConnectivityManager.NetworkCallback mNetworkCallback =
+            new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onCapabilitiesChanged(@NonNull Network network,
+                        @NonNull NetworkCapabilities networkCapabilities) {
+                    mHandler.post(() -> updateFirewall());
+                }
+            };
 
     private final INetworkPolicyListener mNetworkPolicyListener =
             new NetworkPolicyManager.Listener() {
         @Override
-        public void onUidRulesChanged(int uid, int uidRules) {
-            if (DEBUG) Log.d(TAG, "INetworkPolicyListener." +
-                    "onUidRulesChanged: uid: " + uid +
-                    ", uidRules: " + uidRules);
-            updateFirewall();
-        }
-
-        @Override
         public void onUidPoliciesChanged(int uid, int uidPolicies) {
-            if (DEBUG) Log.d(TAG, "INetworkPolicyListener." +
-                    "onUidPoliciesChanged: uid: " + uid +
-                    ", uidPolicies: " + uidPolicies);
-            updateFirewall();
+            mHandler.post(() -> updateFirewall());
         }
     };
 
-    private final SynchronousUserSwitchObserver mUserSwitchListener =
-            new SynchronousUserSwitchObserver() {
+    private final UserTracker.Callback mUserSwitchListener =
+            new UserTracker.Callback() {
                 @Override
-                public void onUserSwitching(int newUserId) throws RemoteException {
+                public void onUserChanging(int newUser, Context userContext) {
                     mHandler.post(() -> mUserInfoController.reloadUserInfo());
                 }
 
                 @Override
-                public void onUserSwitchComplete(int newUserId) throws RemoteException {
+                public void onUserChanged(int newUser, Context userContext) {
                     mHandler.post(() -> {
                         updateAlarm();
                         updateManagedProfile();
